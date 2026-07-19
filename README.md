@@ -1,5 +1,3 @@
-**Modern-loan-eligibility-predication**
-
 
 # 🏦 Modern Loan Eligibility Prediction
 
