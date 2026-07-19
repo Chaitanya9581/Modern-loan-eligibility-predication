@@ -1,0 +1,110 @@
+"""Flask application for the Smart Lender loan eligibility system."""
+
+from __future__ import annotations
+
+import logging
+import os
+from pathlib import Path
+from typing import Any, Dict, List
+
+from flask import Flask, flash, redirect, render_template, request, url_for
+
+from model.predict import predict_from_input
+from model.preprocessing import build_feature_schema
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+
+def create_app() -> Flask:
+    """Application factory for the Flask app."""
+
+    app = Flask(
+        __name__,
+        template_folder=str(PROJECT_ROOT / "templates"),
+        static_folder=str(PROJECT_ROOT / "static"),
+    )
+    app.config.from_mapping(
+        SECRET_KEY=os.getenv("SECRET_KEY", "smart-lender-secret-key"),
+        JSON_SORT_KEYS=False,
+    )
+
+    logging.basicConfig(level=logging.INFO)
+    app.logger.setLevel(logging.INFO)
+
+    @app.context_processor
+    def inject_year() -> Dict[str, int]:
+        """Expose the current year to templates."""
+
+        from datetime import datetime
+
+        return {"current_year": datetime.utcnow().year}
+
+    def get_form_fields() -> List[Dict[str, Any]]:
+        """Build the form metadata from the shared schema."""
+
+        return build_feature_schema()
+
+    @app.errorhandler(404)
+    def not_found(error: Any):
+        """Render a simple 404 page."""
+
+        return render_template("index.html", error_message="Page not found.", fields=[]), 404
+
+    @app.errorhandler(500)
+    def internal_server_error(error: Any):
+        """Render a simple 500 page."""
+
+        app.logger.exception("Unhandled server error: %s", error)
+        return render_template("index.html", error_message="An unexpected error occurred.", fields=[]), 500
+
+    @app.route("/")
+    def index():
+        """Render the landing page."""
+
+        return render_template("index.html", fields=get_form_fields())
+
+    @app.route("/predict", methods=["GET"])
+    def predict_form():
+        """Render the loan prediction form."""
+
+        return render_template("predict.html", fields=get_form_fields())
+
+    @app.route("/result", methods=["POST"])
+    def result():
+        """Process form input and render the prediction result."""
+
+        try:
+            fields = get_form_fields()
+            input_data: Dict[str, Any] = {}
+
+            for field in fields:
+                value = request.form.get(field["name"], "").strip()
+                if value == "":
+                    raise ValueError(f"Missing value for {field['label']}.")
+                input_data[field["name"]] = value
+
+            prediction = predict_from_input(input_data)
+
+            return render_template(
+                "result.html",
+                prediction=prediction,
+                input_data=input_data,
+                fields=fields,
+            )
+        except (FileNotFoundError, KeyError, ValueError) as exc:
+            app.logger.warning("Prediction request rejected: %s", exc)
+            flash(str(exc), "error")
+            return redirect(url_for("predict_form"))
+        except Exception as exc:
+            app.logger.exception("Prediction failed: %s", exc)
+            flash("Unable to generate prediction. Please try again.", "error")
+            return redirect(url_for("predict_form"))
+
+    return app
+
+
+app = create_app()
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=os.getenv("FLASK_DEBUG", "0") == "1")
