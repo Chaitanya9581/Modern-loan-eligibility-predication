@@ -1,0 +1,200 @@
+"""Shared preprocessing helpers and feature schema for Smart Lender.
+
+This module keeps the Flask form, prediction code, and training pipeline
+aligned on the same input contract.
+"""
+
+from __future__ import annotations
+
+from copy import deepcopy
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+import pandas as pd
+from sklearn.preprocessing import LabelEncoder
+
+TARGET_COLUMN = "Loan_Status"
+
+FEATURE_SCHEMA: List[Dict[str, object]] = [
+    {
+        "name": "Gender",
+        "label": "Gender",
+        "kind": "categorical",
+        "options": ["Male", "Female"],
+    },
+    {
+        "name": "Married",
+        "label": "Married",
+        "kind": "categorical",
+        "options": ["Yes", "No"],
+    },
+    {
+        "name": "Dependents",
+        "label": "Dependents",
+        "kind": "categorical",
+        "options": ["0", "1", "2", "3+"],
+    },
+    {
+        "name": "Education",
+        "label": "Education",
+        "kind": "categorical",
+        "options": ["Graduate", "Not Graduate"],
+    },
+    {
+        "name": "Self_Employed",
+        "label": "Self Employed",
+        "kind": "categorical",
+        "options": ["Yes", "No"],
+    },
+    {
+        "name": "ApplicantIncome",
+        "label": "Applicant Income",
+        "kind": "numeric",
+    },
+    {
+        "name": "CoapplicantIncome",
+        "label": "Coapplicant Income",
+        "kind": "numeric",
+    },
+    {
+        "name": "LoanAmount",
+        "label": "Loan Amount",
+        "kind": "numeric",
+    },
+    {
+        "name": "Loan_Amount_Term",
+        "label": "Loan Amount Term",
+        "kind": "numeric",
+    },
+    {
+        "name": "Credit_History",
+        "label": "Credit History",
+        "kind": "categorical",
+        "options": ["1", "0"],
+    },
+    {
+        "name": "Property_Area",
+        "label": "Property Area",
+        "kind": "categorical",
+        "options": ["Urban", "Semiurban", "Rural"],
+    },
+]
+
+FEATURE_COLUMNS: List[str] = [field["name"] for field in FEATURE_SCHEMA]
+CATEGORICAL_FEATURES: List[str] = [field["name"] for field in FEATURE_SCHEMA if field["kind"] == "categorical"]
+NUMERIC_FEATURES: List[str] = [field["name"] for field in FEATURE_SCHEMA if field["kind"] == "numeric"]
+
+
+def build_feature_schema() -> List[Dict[str, object]]:
+    """Return a copy of the feature schema for safe downstream use."""
+
+    return deepcopy(FEATURE_SCHEMA)
+
+
+def load_dataset(file_path: str | Path) -> pd.DataFrame:
+    """Load the loan dataset from disk and validate that it is usable."""
+
+    dataset_path = Path(file_path)
+    if not dataset_path.exists():
+        raise FileNotFoundError(f"Dataset not found: {dataset_path}")
+
+    dataframe = pd.read_csv(dataset_path)
+    if dataframe.empty:
+        raise ValueError(
+            "The dataset is empty. Add the loan training data to dataset/loan_data.csv before training the model."
+        )
+
+    return dataframe
+
+
+def display_dataset_info(dataframe: pd.DataFrame) -> None:
+    """Print a concise summary of the dataset."""
+
+    print("Dataset shape:", dataframe.shape)
+    print("\nDataset info:")
+    dataframe.info()
+    print("\nMissing values per column:")
+    print(dataframe.isnull().sum())
+
+
+def summarize_missing_values(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """Return a DataFrame summarizing missing values and percentages."""
+
+    missing_values = dataframe.isnull().sum()
+    missing_percent = (missing_values / len(dataframe) * 100).round(2)
+    summary = pd.DataFrame({"Missing Values": missing_values, "Percentage": missing_percent})
+    return summary[summary["Missing Values"] > 0].sort_values(by="Missing Values", ascending=False)
+
+
+def handle_missing_values(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """Fill numeric columns with the mean and categorical columns with the mode."""
+
+    cleaned_frame = dataframe.copy()
+
+    for column in cleaned_frame.select_dtypes(include=["number"]).columns:
+        cleaned_frame[column] = cleaned_frame[column].fillna(cleaned_frame[column].mean())
+
+    for column in cleaned_frame.select_dtypes(include=["object", "category", "bool"]).columns:
+        mode_values = cleaned_frame[column].mode(dropna=True)
+        if not mode_values.empty:
+            cleaned_frame[column] = cleaned_frame[column].fillna(mode_values.iloc[0])
+
+    return cleaned_frame
+
+
+def split_features_target(
+    dataframe: pd.DataFrame,
+    target_column: str = TARGET_COLUMN,
+) -> Tuple[pd.DataFrame, pd.Series]:
+    """Split the dataset into features and target."""
+
+    if target_column not in dataframe.columns:
+        raise KeyError(f"Target column '{target_column}' not found in dataset.")
+
+    features = dataframe.drop(columns=[target_column]).copy()
+    target = dataframe[target_column].copy()
+    return features, target
+
+
+def encode_target(target: pd.Series) -> Tuple[pd.Series, LabelEncoder]:
+    """Encode the target column into a binary numeric representation."""
+
+    normalized = target.astype(str).str.strip().str.upper()
+    known_mapping = {
+        "Y": 1,
+        "YES": 1,
+        "APPROVED": 1,
+        "1": 1,
+        "N": 0,
+        "NO": 0,
+        "REJECTED": 0,
+        "0": 0,
+    }
+
+    if normalized.isin(known_mapping).all():
+        encoded_target = normalized.map(known_mapping).astype(int)
+        target_encoder = LabelEncoder()
+        target_encoder.fit(["Rejected", "Approved"])
+        return encoded_target, target_encoder
+
+    target_encoder = LabelEncoder()
+    encoded_target = pd.Series(target_encoder.fit_transform(target.astype(str)), index=target.index, name=target.name)
+    return encoded_target, target_encoder
+
+
+def coerce_numeric_inputs(input_data: Dict[str, object]) -> Dict[str, object]:
+    """Normalize raw form inputs into model-ready Python types."""
+
+    normalized_input: Dict[str, object] = {}
+    for field in FEATURE_SCHEMA:
+        name = field["name"]
+        if name not in input_data:
+            raise KeyError(f"Missing required input field: {name}")
+
+        value = input_data[name]
+        if field["kind"] == "numeric":
+            normalized_input[name] = float(value)
+        else:
+            normalized_input[name] = str(value)
+
+    return normalized_input
